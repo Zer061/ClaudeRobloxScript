@@ -6,7 +6,7 @@
 		MOVE    WalkSpeed, Jump, Fly + Fly Speed, Noclip
 		VIEW    Field of View, Fullbright, ESP on other players
 		KEY     Object ESP: terms, scan rate, range, then
-		        Auto Move + delay and Go to nearest
+		        Auto Move + delay, Go to nearest, Instant Prompt
 		OPT     Hotkeys, UI Scale (resize the panel), Unload
 
 	WHERE TO PUT IT:
@@ -27,6 +27,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
 
 local player = Players.LocalPlayer
 
@@ -92,6 +93,7 @@ local state = {
 	KeyESP = false,
 	Hotkeys = false, -- master switch starts OFF; turn on in the OPT tab
 	AutoMove = false,
+	InstantPrompt = false,
 	ScanInterval = DEFAULTS.ScanInterval, -- seconds between workspace sweeps
 	MoveDelay = DEFAULTS.MoveDelay, -- seconds between auto-move hops
 	SearchRange = DEFAULTS.SearchRange, -- studs; 0 means no limit
@@ -1474,6 +1476,74 @@ autoMoveBtn.Activated:Connect(function()
 end)
 
 --------------------------------------------------------------------
+-- KEY TAB: INSTANT PROMPT
+--   Every hold-to-use prompt ("hold E to rescue") fires on the first
+--   press. Each prompt's own hold time is remembered and put back when
+--   this is turned off or the script unloads.
+--   Only the timer on our side is skipped: a game that times the hold
+--   on the server can still reject an instant press.
+--------------------------------------------------------------------
+
+local promptBackup = {} -- ProximityPrompt -> original HoldDuration
+
+local function makeInstant(prompt)
+	if prompt.HoldDuration <= 0 then
+		return
+	end
+	if promptBackup[prompt] == nil then
+		-- forget prompts destroyed since the last one (NPCs come and go)
+		for old in pairs(promptBackup) do
+			if old.Parent == nil then
+				promptBackup[old] = nil
+			end
+		end
+		promptBackup[prompt] = prompt.HoldDuration
+	end
+	prompt.HoldDuration = 0
+end
+
+local function restorePrompts()
+	for prompt, duration in pairs(promptBackup) do
+		if prompt.Parent then
+			prompt.HoldDuration = duration
+		end
+	end
+	table.clear(promptBackup)
+end
+
+local instantBtn = toggleButton(keyPage, 8, "Instant Prompt")
+
+local function setInstantPrompt(on)
+	state.InstantPrompt = on
+	paintToggle(instantBtn, "Instant Prompt", on)
+	if on then
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			if obj:IsA("ProximityPrompt") then
+				makeInstant(obj)
+			end
+		end
+	else
+		restorePrompts()
+	end
+end
+
+instantBtn.Activated:Connect(function()
+	setInstantPrompt(not state.InstantPrompt)
+end)
+
+-- Prompts that appear later (a freshly spawned NPC) are caught as soon as
+-- they show up for us, and again when a hold starts in case the game has
+-- re-armed the timer in the meantime.
+local function onPrompt(prompt)
+	if state.InstantPrompt then
+		makeInstant(prompt)
+	end
+end
+
+bind(ProximityPromptService.PromptShown, onPrompt)
+bind(ProximityPromptService.PromptButtonHoldBegan, onPrompt)
+
+--------------------------------------------------------------------
 -- KEY ESP LOOP (user-set scan rate + fixed 0.1s tag/HUD refresh)
 --------------------------------------------------------------------
 
@@ -1542,6 +1612,7 @@ resetBtn.Activated:Connect(function()
 	setFullbright(false)
 	setESP(false)
 	setKeyESP(false)
+	setInstantPrompt(false)
 
 	fovOverride = false
 	state.FOV = DEFAULTS.FOV
@@ -1751,13 +1822,14 @@ end
 
 local function unloadScript()
 	-- 1. switch every feature off through its own setter, which restores
-	--    lighting, collisions, highlights and the fly mover.
+	--    lighting, collisions, highlights, prompt hold times and the fly mover.
 	setAutoMove(false)
 	setFly(false)
 	setNoclip(false)
 	setFullbright(false)
 	setESP(false)
 	setKeyESP(false)
+	setInstantPrompt(false)
 
 	-- 2. hand the camera back to the game
 	if fovOverride then
