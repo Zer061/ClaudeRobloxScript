@@ -3,7 +3,7 @@
 	---------------------------------------
 	A LocalScript with a small draggable GUI split into four tabs (each page scrolls if it overflows):
 
-		MOVE    WalkSpeed, Jump, Fly + Fly Speed, Noclip
+		MOVE    WalkSpeed, Jump, Fly + Fly Speed, Noclip, Fast Attack
 		VIEW    Field of View, Fullbright, ESP on other players
 		KEY     Object ESP: terms, scan rate, range, then
 		        Auto Move + delay, Go to nearest, Instant Prompt
@@ -71,6 +71,7 @@ local DEFAULTS = {
 	JumpHeight = 7.2,
 	FOV = 70,
 	FlySpeed = 60,
+	AttackSpeed = 3, -- swing animation speed multiplier
 	KeyQuery = "redkey",
 	ScanInterval = 1,
 	MoveDelay = 2,
@@ -86,8 +87,10 @@ local state = {
 	JumpHeight = DEFAULTS.JumpHeight,
 	FOV = startCam and startCam.FieldOfView or DEFAULTS.FOV,
 	FlySpeed = DEFAULTS.FlySpeed,
+	AttackSpeed = DEFAULTS.AttackSpeed,
 	Fly = false,
 	Noclip = false,
+	FastAttack = false,
 	Fullbright = false,
 	ESP = false,
 	KeyESP = false,
@@ -715,6 +718,104 @@ end
 noclipBtn.Activated:Connect(function()
 	setNoclip(not state.Noclip)
 end)
+
+--------------------------------------------------------------------
+-- MOVE TAB: FAST ATTACK
+--   Plays your swing animations faster (tool swings, punches). A game
+--   that waits for the swing to finish before the next hit then hits
+--   faster too; one that uses its own cooldown or limits hits on the
+--   server does not change. Swings are the one-shot or Action-priority
+--   tracks, so looping walk / run / idle animations are left alone.
+--------------------------------------------------------------------
+
+local SWING_PRIORITY = {
+	[Enum.AnimationPriority.Action] = true,
+	[Enum.AnimationPriority.Action2] = true,
+	[Enum.AnimationPriority.Action3] = true,
+	[Enum.AnimationPriority.Action4] = true,
+}
+
+local spedTracks = {} -- AnimationTrack -> speed it had before we touched it
+local swingConn = nil -- AnimationPlayed on the current character's Animator
+
+local function isSwing(track)
+	return SWING_PRIORITY[track.Priority] == true or not track.Looped
+end
+
+local function speedUp(track)
+	if not isSwing(track) then
+		return
+	end
+	if spedTracks[track] == nil then
+		-- forget tracks that finished since the last swing
+		for old in pairs(spedTracks) do
+			if not old.IsPlaying then
+				spedTracks[old] = nil
+			end
+		end
+		spedTracks[track] = track.Speed
+	end
+	track:AdjustSpeed(state.AttackSpeed)
+end
+
+local fastBtn = toggleButton(movePage, 6, "Fast Attack")
+
+numberRow(movePage, 7, "Attack Speed", "AttackSpeed", 1, 10, 0.5, 1, function(value)
+	if state.FastAttack then
+		for track in pairs(spedTracks) do
+			if track.IsPlaying then
+				track:AdjustSpeed(value)
+			end
+		end
+	end
+end)
+
+local function setFastAttack(on)
+	state.FastAttack = on
+	paintToggle(fastBtn, "Fast Attack", on)
+	if on then
+		local hum = getHumanoid()
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if animator then
+			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+				speedUp(track)
+			end
+		end
+	else
+		for track, speed in pairs(spedTracks) do
+			if track.IsPlaying then
+				track:AdjustSpeed(speed)
+			end
+		end
+		table.clear(spedTracks)
+	end
+end
+
+fastBtn.Activated:Connect(function()
+	setFastAttack(not state.FastAttack)
+end)
+
+-- Every animation the character starts passes through here, so a swing is
+-- sped up the moment it plays. Re-hooked on respawn (new Animator).
+local function hookAnimator(char)
+	if swingConn then
+		swingConn:Disconnect()
+		swingConn = nil
+	end
+	local hum = char and char:WaitForChild("Humanoid", 5)
+	local animator = hum and hum:WaitForChild("Animator", 5)
+	if not animator then
+		return
+	end
+	swingConn = bind(animator.AnimationPlayed, function(track)
+		if state.FastAttack then
+			speedUp(track)
+		end
+	end)
+end
+
+bind(player.CharacterAdded, hookAnimator)
+task.spawn(hookAnimator, player.Character)
 
 --------------------------------------------------------------------
 -- VIEW TAB: FIELD OF VIEW  (low = narrow / zoomed in, high = wide)
@@ -1605,10 +1706,12 @@ resetBtn.Activated:Connect(function()
 	state.MoveDelay = DEFAULTS.MoveDelay
 	state.SearchRange = DEFAULTS.SearchRange
 	state.FlySpeed = DEFAULTS.FlySpeed
+	state.AttackSpeed = DEFAULTS.AttackSpeed
 
 	setAutoMove(false)
 	setFly(false)
 	setNoclip(false)
+	setFastAttack(false)
 	setFullbright(false)
 	setESP(false)
 	setKeyESP(false)
@@ -1822,10 +1925,12 @@ end
 
 local function unloadScript()
 	-- 1. switch every feature off through its own setter, which restores
-	--    lighting, collisions, highlights, prompt hold times and the fly mover.
+	--    lighting, collisions, highlights, prompt hold times, swing speed
+	--    and the fly mover.
 	setAutoMove(false)
 	setFly(false)
 	setNoclip(false)
+	setFastAttack(false)
 	setFullbright(false)
 	setESP(false)
 	setKeyESP(false)
