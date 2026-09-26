@@ -1907,9 +1907,36 @@ local function setAutoRescue(on)
 							"FLOOR: → %s  (%d/%d rescued)",
 							doors[1].instance.Name, rescued, target
 						)
-						teleportTo(doors[1].part.Position)
-						task.wait(0.3)
-						firePromptsOn(doors[1].instance)
+						-- Stand in front of the door, walk back and forth
+						local doorPos = doors[1].part.Position
+						local char = player.Character
+						local root = char and char:FindFirstChild("HumanoidRootPart")
+						if root then
+							local dirToDoor = (doorPos - root.Position)
+							dirToDoor = Vector3.new(dirToDoor.X, 0, dirToDoor.Z)
+							if dirToDoor.Magnitude > 0.01 then
+								dirToDoor = dirToDoor.Unit
+							else
+								dirToDoor = root.CFrame.LookVector
+							end
+							local nearPos = doorPos - dirToDoor * 3 + Vector3.new(0, 3, 0)
+							local farPos  = doorPos - dirToDoor * 6 + Vector3.new(0, 3, 0)
+							-- Approach door
+							root.CFrame = CFrame.new(nearPos, doorPos)
+							task.wait(0.25)
+							-- Step back
+							root.CFrame = CFrame.new(farPos, doorPos)
+							task.wait(0.25)
+							-- Approach again
+							root.CFrame = CFrame.new(nearPos, doorPos)
+							task.wait(0.25)
+							-- Step back
+							root.CFrame = CFrame.new(farPos, doorPos)
+							task.wait(0.25)
+						end
+						if not firePromptsOn(doors[1].instance) then
+							fireNearbyPrompts(10)
+						end
 					else
 						rescueHud.Text = "RESCUE: no Door found, waiting..."
 					end
