@@ -1916,36 +1916,63 @@ local function setAutoRescue(on)
 						local doorPos = doors[1].part.Position
 						local char = player.Character
 						local root = char and char:FindFirstChild("HumanoidRootPart")
+
+						-- Calculate direction toward door
+						local dirToDoor
 						if root then
-							local dirToDoor = (doorPos - root.Position)
+							dirToDoor = (doorPos - root.Position)
 							dirToDoor = Vector3.new(dirToDoor.X, 0, dirToDoor.Z)
 							if dirToDoor.Magnitude > 0.01 then
 								dirToDoor = dirToDoor.Unit
 							else
 								dirToDoor = root.CFrame.LookVector
 							end
+							-- Teleport to 3 studs in front of door, facing it
+							local standPos = doorPos - dirToDoor * 3 + Vector3.new(0, 3, 0)
+							root.CFrame = CFrame.new(standPos, doorPos)
+						end
+						task.wait(0.3)
 
-							-- Check if DoorHpUi still exists (door not broken yet)
-							if doorInst:FindFirstChild("DoorHpUi", true) then
-								-- Door still has HP → walk back and forth in front, don't go through
-								local nearPos = doorPos - dirToDoor * 3 + Vector3.new(0, 3, 0)
-								local farPos  = doorPos - dirToDoor * 6 + Vector3.new(0, 3, 0)
+						-- Phase A: attack the door until DoorHpUi disappears
+						local attackStart = tick()
+						local maxAttackTime = 30 -- timeout after 30s
+						while doorInst:FindFirstChild("DoorHpUi", true)
+							and state.AutoRescue
+							and generation == autoRescueGen
+							and (tick() - attackStart) < maxAttackTime do
+
+							rescueHud.Text = string.format(
+								"DOOR: attacking %s...", doorInst.Name
+							)
+							-- Fire prompts on door and nearby
+							firePromptsOn(doorInst)
+							fireNearbyPrompts(10)
+							task.wait(0.5)
+
+							-- Wiggle in front of the door to keep attacking
+							if root and root.Parent and dirToDoor then
+								local nearPos = doorPos - dirToDoor * 2.5 + Vector3.new(0, 3, 0)
+								local farPos  = doorPos - dirToDoor * 4 + Vector3.new(0, 3, 0)
 								root.CFrame = CFrame.new(nearPos, doorPos)
-								task.wait(0.25)
+								task.wait(0.3)
 								root.CFrame = CFrame.new(farPos, doorPos)
-								task.wait(0.25)
-								root.CFrame = CFrame.new(nearPos, doorPos)
-								task.wait(0.25)
-								root.CFrame = CFrame.new(farPos, doorPos)
-								task.wait(0.25)
-							else
-								-- DoorHpUi gone → door is open, walk through
-								teleportTo(doorPos)
 								task.wait(0.3)
 							end
 						end
-						if not firePromptsOn(doorInst) then
-							fireNearbyPrompts(10)
+
+						-- Phase B: door broken → walk through into the room
+						if not doorInst:FindFirstChild("DoorHpUi", true) then
+							rescueHud.Text = string.format(
+								"DOOR: %s broken! entering room...", doorInst.Name
+							)
+							teleportTo(doorPos)
+							task.wait(0.5)
+							-- Move a bit past the door to get inside
+							if root and root.Parent and dirToDoor then
+								local insidePos = doorPos + dirToDoor * 5 + Vector3.new(0, 3, 0)
+								root.CFrame = CFrame.new(insidePos, insidePos + dirToDoor)
+							end
+							task.wait(0.3)
 						end
 					else
 						-- Count all "Door" instances for debug
