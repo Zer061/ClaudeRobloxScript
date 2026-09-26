@@ -1887,7 +1887,9 @@ local function setAutoRescue(on)
 					origin = measureOrigin()
 					local doors = {}
 					for _, inst in ipairs(workspace:GetDescendants()) do
-						if string.find(string.lower(inst.Name), "door") then
+						-- Match Door instances that have a DoorHpUi child (door still has HP)
+						if string.lower(inst.Name) == "door"
+							and inst:FindFirstChild("DoorHpUi") then
 							local part = anchorPart(inst)
 							-- Only pick doors ABOVE the player (next floor up)
 							if part and origin and part.Position.Y > origin.Y then
@@ -1903,11 +1905,11 @@ local function setAutoRescue(on)
 					end
 
 					if #doors > 0 and doors[1].part and doors[1].part.Parent then
+						local doorInst = doors[1].instance
 						rescueHud.Text = string.format(
 							"FLOOR: → %s  (%d/%d rescued)",
-							doors[1].instance.Name, rescued, target
+							doorInst.Name, rescued, target
 						)
-						-- Stand in front of the door, walk back and forth
 						local doorPos = doors[1].part.Position
 						local char = player.Character
 						local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -1919,22 +1921,27 @@ local function setAutoRescue(on)
 							else
 								dirToDoor = root.CFrame.LookVector
 							end
-							local nearPos = doorPos - dirToDoor * 3 + Vector3.new(0, 3, 0)
-							local farPos  = doorPos - dirToDoor * 6 + Vector3.new(0, 3, 0)
-							-- Approach door
-							root.CFrame = CFrame.new(nearPos, doorPos)
-							task.wait(0.25)
-							-- Step back
-							root.CFrame = CFrame.new(farPos, doorPos)
-							task.wait(0.25)
-							-- Approach again
-							root.CFrame = CFrame.new(nearPos, doorPos)
-							task.wait(0.25)
-							-- Step back
-							root.CFrame = CFrame.new(farPos, doorPos)
-							task.wait(0.25)
+
+							-- Check if DoorHpUi still exists (door not broken yet)
+							if doorInst:FindFirstChild("DoorHpUi") then
+								-- Door still has HP → walk back and forth in front, don't go through
+								local nearPos = doorPos - dirToDoor * 3 + Vector3.new(0, 3, 0)
+								local farPos  = doorPos - dirToDoor * 6 + Vector3.new(0, 3, 0)
+								root.CFrame = CFrame.new(nearPos, doorPos)
+								task.wait(0.25)
+								root.CFrame = CFrame.new(farPos, doorPos)
+								task.wait(0.25)
+								root.CFrame = CFrame.new(nearPos, doorPos)
+								task.wait(0.25)
+								root.CFrame = CFrame.new(farPos, doorPos)
+								task.wait(0.25)
+							else
+								-- DoorHpUi gone → door is open, walk through
+								teleportTo(doorPos)
+								task.wait(0.3)
+							end
 						end
-						if not firePromptsOn(doors[1].instance) then
+						if not firePromptsOn(doorInst) then
 							fireNearbyPrompts(10)
 						end
 					else
