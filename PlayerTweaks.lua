@@ -1693,6 +1693,28 @@ local function firePrompt(prompt)
 	prompt.HoldDuration = oldHold
 end
 
+-- Scan workspace for all ProximityPrompts within `radius` studs of the
+-- player's current position and fire each one.  Returns true if any found.
+local function fireNearbyPrompts(radius)
+	local origin = measureOrigin()
+	if not origin then return false end
+	local found = false
+	for _, desc in ipairs(workspace:GetDescendants()) do
+		if desc:IsA("ProximityPrompt") then
+			local part = desc:FindFirstAncestorWhichIsA("BasePart")
+				or desc.Parent and desc.Parent:IsA("BasePart") and desc.Parent
+			if part then
+				local dist = (part.Position - origin).Magnitude
+				if dist <= radius then
+					firePrompt(desc)
+					found = true
+				end
+			end
+		end
+	end
+	return found
+end
+
 -- Search inside an instance (and its parent's children) for ProximityPrompts
 -- and fire each one. Returns true if at least one was found.
 local function firePromptsOn(inst)
@@ -1970,7 +1992,12 @@ local function setAutoRescue(on)
 				rescueHud.Text = string.format("EXIT: → %s", exits[1].instance.Name)
 				teleportTo(exits[1].part.Position)
 				task.wait(0.3)
-				firePromptsOn(exits[1].instance)
+				local fired = firePromptsOn(exits[1].instance)
+				if not fired then
+					-- Fallback: scan for any ProximityPrompt within 15 studs
+					task.wait(0.2)
+					fireNearbyPrompts(15)
+				end
 			else
 				rescueHud.Text = string.format("RESCUE: no '%s' found, retrying...", exitSearch)
 			end
