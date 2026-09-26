@@ -80,6 +80,8 @@ local DEFAULTS = {
 	UIScale = 1.2, -- whole-panel zoom
 	RescueDelay = 1, -- seconds between each NPC rescue
 	DoorDelay = 3, -- seconds to wait after entering door (floor transition)
+	RescueCount = 0, -- 0 = rescue all NPCs, >0 = rescue up to N
+	ExitName = "zipline", -- name pattern for exit object after rescue
 }
 
 local startCam = workspace.CurrentCamera
@@ -107,6 +109,8 @@ local state = {
 	UIScale = DEFAULTS.UIScale, -- whole-panel zoom
 	RescueDelay = DEFAULTS.RescueDelay,
 	DoorDelay = DEFAULTS.DoorDelay,
+	RescueCount = DEFAULTS.RescueCount,
+	ExitName = DEFAULTS.ExitName,
 }
 
 -- Key ESP search terms. A name matching ANY of these counts as a hit, so the
@@ -1733,8 +1737,19 @@ rescueHeader.Parent = keyPage
 
 local autoRescueBtn = toggleButton(keyPage, 10, "Auto Rescue")
 
-numberRow(keyPage, 11, "Rescue (sec)", "RescueDelay", 0.1, 10, 0.5, 1, nil)
-numberRow(keyPage, 12, "Door (sec)", "DoorDelay", 0.5, 15, 0.5, 1, nil)
+numberRow(keyPage, 11, "Rescue #  0=all", "RescueCount", 0, 50, 1, 0, nil)
+numberRow(keyPage, 12, "Rescue (sec)", "RescueDelay", 0.1, 10, 0.5, 1, nil)
+numberRow(keyPage, 13, "Exit (sec)", "DoorDelay", 0.5, 15, 0.5, 1, nil)
+
+-- What to teleport to after rescuing. Default "zipline" matches ZiplineBalconyAnchor.
+local exitBox = textRow(keyPage, 14, "Exit name", state.ExitName, "zipline", function(text)
+	local trimmed = string.match(text or "", "^%s*(.-)%s*$") or ""
+	if trimmed == "" then
+		trimmed = DEFAULTS.ExitName
+	end
+	state.ExitName = string.lower(trimmed)
+	return state.ExitName
+end)
 
 -- HUD: shows what Auto Rescue is currently doing
 local rescueHud = Instance.new("TextLabel")
@@ -1796,19 +1811,24 @@ local function setAutoRescue(on)
 				end)
 			end
 
-			rescueHud.Text = string.format("RESCUE: found %d NPC(s)", #npcs)
+			-- Limit NPCs if RescueCount > 0
+			local maxRescue = (state.RescueCount > 0) and state.RescueCount or #npcs
+			local total = math.min(#npcs, maxRescue)
+
+			rescueHud.Text = string.format("RESCUE: found %d NPC(s), will rescue %d", #npcs, total)
 			rescueHud.TextColor3 = THEME.ally
 			rescueHud.Visible = true
 
 			local rescued = 0
 			for i, npc in ipairs(npcs) do
+				if rescued >= total then break end
 				if not state.AutoRescue or generation ~= autoRescueGen then
 					break
 				end
 				if npc.part and npc.part.Parent and npc.instance.Parent then
 					rescueHud.Text = string.format(
 						"RESCUE: %d/%d  →  %s",
-						i, #npcs, npc.instance.Name
+						rescued + 1, total, npc.instance.Name
 					)
 					teleportTo(npc.part.Position)
 					task.wait(0.3) -- let the prompt appear
