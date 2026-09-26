@@ -1887,10 +1887,12 @@ local function setAutoRescue(on)
 					origin = measureOrigin()
 					local doors = {}
 					for _, inst in ipairs(workspace:GetDescendants()) do
-						-- Match Door instances that have a DoorHpUi child (door still has HP)
+						-- Match instances named exactly "Door" that have DoorHpUi
+						-- anywhere inside them (recursive search)
 						if string.lower(inst.Name) == "door"
-							and inst:FindFirstChild("DoorHpUi") then
+							and inst:FindFirstChild("DoorHpUi", true) then
 							local part = anchorPart(inst)
+								or inst:FindFirstChildWhichIsA("BasePart", true)
 							-- Only pick doors ABOVE the player (next floor up)
 							if part and origin and part.Position.Y > origin.Y then
 								table.insert(doors, { instance = inst, part = part })
@@ -1906,9 +1908,10 @@ local function setAutoRescue(on)
 
 					if #doors > 0 and doors[1].part and doors[1].part.Parent then
 						local doorInst = doors[1].instance
+						local doorDist = origin and math.floor((doors[1].part.Position - origin).Magnitude) or 0
 						rescueHud.Text = string.format(
-							"FLOOR: → %s  (%d/%d rescued)",
-							doorInst.Name, rescued, target
+							"FLOOR: → %s [%dm] (%d found, %d/%d rescued)",
+							doorInst.Name, doorDist, #doors, rescued, target
 						)
 						local doorPos = doors[1].part.Position
 						local char = player.Character
@@ -1923,7 +1926,7 @@ local function setAutoRescue(on)
 							end
 
 							-- Check if DoorHpUi still exists (door not broken yet)
-							if doorInst:FindFirstChild("DoorHpUi") then
+							if doorInst:FindFirstChild("DoorHpUi", true) then
 								-- Door still has HP → walk back and forth in front, don't go through
 								local nearPos = doorPos - dirToDoor * 3 + Vector3.new(0, 3, 0)
 								local farPos  = doorPos - dirToDoor * 6 + Vector3.new(0, 3, 0)
@@ -1945,7 +1948,21 @@ local function setAutoRescue(on)
 							fireNearbyPrompts(10)
 						end
 					else
-						rescueHud.Text = "RESCUE: no Door found, waiting..."
+						-- Count all "Door" instances for debug
+						local allDoors = 0
+						local doorsWithHp = 0
+						for _, inst in ipairs(workspace:GetDescendants()) do
+							if string.lower(inst.Name) == "door" then
+								allDoors = allDoors + 1
+								if inst:FindFirstChild("DoorHpUi", true) then
+									doorsWithHp = doorsWithHp + 1
+								end
+							end
+						end
+						rescueHud.Text = string.format(
+							"RESCUE: no Door above — total:%d withHP:%d",
+							allDoors, doorsWithHp
+						)
 					end
 
 					-- Wait for new floor to load
