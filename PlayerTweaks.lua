@@ -7,7 +7,7 @@
 		VIEW    Field of View, Fullbright, ESP on other players
 		KEY     Object ESP: terms, scan rate, range, then
 		        Auto Move + delay, Go to nearest, Instant Prompt,
-		        Auto Rescue (rescue NPCs then go to door, loop)
+		        Auto Rescue (rescue N NPCs then zipline out, loop)
 		OPT     Hotkeys, UI Scale (resize the panel), Unload
 
 	WHERE TO PUT IT:
@@ -82,6 +82,7 @@ local DEFAULTS = {
 	DoorDelay = 3, -- seconds to wait after entering door (floor transition)
 	RescueCount = 0, -- 0 = rescue all NPCs, >0 = rescue up to N
 	ExitName = "zipline", -- name pattern for exit object after rescue
+	FloorDelay = 5, -- seconds to wait after going through door to next floor
 }
 
 local startCam = workspace.CurrentCamera
@@ -111,6 +112,7 @@ local state = {
 	DoorDelay = DEFAULTS.DoorDelay,
 	RescueCount = DEFAULTS.RescueCount,
 	ExitName = DEFAULTS.ExitName,
+	FloorDelay = DEFAULTS.FloorDelay,
 }
 
 -- Key ESP search terms. A name matching ANY of these counts as a hit, so the
@@ -1739,10 +1741,11 @@ local autoRescueBtn = toggleButton(keyPage, 10, "Auto Rescue")
 
 numberRow(keyPage, 11, "Rescue #  0=all", "RescueCount", 0, 50, 1, 0, nil)
 numberRow(keyPage, 12, "Rescue (sec)", "RescueDelay", 0.1, 10, 0.5, 1, nil)
-numberRow(keyPage, 13, "Exit (sec)", "DoorDelay", 0.5, 15, 0.5, 1, nil)
+numberRow(keyPage, 13, "Floor (sec)", "FloorDelay", 1, 30, 1, 0, nil)
+numberRow(keyPage, 14, "Exit (sec)", "DoorDelay", 0.5, 15, 0.5, 1, nil)
 
 -- What to teleport to after rescuing. Default "zipline" matches ZiplineBalconyAnchor.
-local exitBox = textRow(keyPage, 14, "Exit name", state.ExitName, "zipline", function(text)
+local exitBox = textRow(keyPage, 15, "Exit name", state.ExitName, "zipline", function(text)
 	local trimmed = string.match(text or "", "^%s*(.-)%s*$") or ""
 	if trimmed == "" then
 		trimmed = DEFAULTS.ExitName
@@ -1790,51 +1793,145 @@ local function setAutoRescue(on)
 		while state.AutoRescue and generation == autoRescueGen do
 
 			-------------------------------------------------
-			-- Phase 1: find & rescue every RescueNpc
+			-- Phase 1: rescue NPCs until quota is met
+			--   If RescueCount=5 but only 3 NPCs exist now,
+			--   rescue those 3, wait, rescan, rescue more
+			--   until total reaches 5. RescueCount=0 means
+			--   rescue ALL found in one scan pass.
 			-------------------------------------------------
-			local npcs = {}
-			for _, inst in ipairs(workspace:GetDescendants()) do
-				if string.find(string.lower(inst.Name), "rescuenpc") then
-					local part = anchorPart(inst)
-					if part and not isMine(inst) then
-						table.insert(npcs, { instance = inst, part = part })
+			local target = (state.RescueCount > 0) and state.RescueCount or 0
+			local rescued = 0
+			local rescuedSet = {} -- track instances already rescued
+
+			while state.AutoRescue and generation == autoRescueGen do
+				-- Scan for NPCs we haven't rescued yet
+				local npcs = {}
+				for _, inst in ipairs(workspace:GetDescendants()) do
+					if string.find(string.lower(inst.Name), "rescuenpc") then
+						if not rescuedSet[inst] then
+							local part = anchorPart(inst)
+							if part and not isMine(inst) then
+								table.insert(npcs, { instance = inst, part = part })
+							end
+						end
 					end
 				end
-			end
 
-			-- Sort nearest first
-			local origin = measureOrigin()
-			if origin then
-				table.sort(npcs, function(a, b)
-					return (a.part.Position - origin).Magnitude
-						 < (b.part.Position - origin).Magnitude
-				end)
-			end
+				-- Sort nearest first
+				local origin = measureOrigin()
+				if origin then
+					table.sort(npcs, function(a, b)
+						return (a.part.Position - origin).Magnitude
+							 < (b.part.Position - origin).Magnitude
+					end)
+				end
 
-			-- Limit NPCs if RescueCount > 0
-			local maxRescue = (state.RescueCount > 0) and state.RescueCount or #npcs
-			local total = math.min(#npcs, maxRescue)
+				-- How many to rescue this pass
+				local remaining
+				if target > 0 then
+					remaining = target - rescued
+				else
+					remaining = #npcs -- 0=all: rescue everything found
+				end
 
-			rescueHud.Text = string.format("RESCUE: found %d NPC(s), will rescue %d", #npcs, total)
-			rescueHud.TextColor3 = THEME.ally
-			rescueHud.Visible = true
+				rescueHud.Text = string.format(
+					"RESCUE: %d done, found %d new, need %s",
+					rescued, #npcs,
+					target > 0 and tostring(target) or "all"
+				)
+				rescueHud.TextColor3 = THEME.ally
+				rescueHud.Visible = true
 
-			local rescued = 0
-			for i, npc in ipairs(npcs) do
-				if rescued >= total then break end
-				if not state.AutoRescue or generation ~= autoRescueGen then
+				-- Quota already met → move on to zipline
+				if target > 0 and rescued >= target then
 					break
 				end
-				if npc.part and npc.part.Parent and npc.instance.Parent then
+				-- 0=all mode and no NPCs left → move on to zipline
+				if target == 0 and #npcs == 0 then
+					break
+				end
+
+				if #npcs == 0 and target > 0 and rescued < target then
+					----------------------------------------------
+					-- No NPCs on this floor but quota not met
+					-- → go to Door to advance to next floor
+					----------------------------------------------
 					rescueHud.Text = string.format(
-						"RESCUE: %d/%d  →  %s",
-						rescued + 1, total, npc.instance.Name
+						"RESCUE: %d/%d — no NPCs, going to Door...",
+						rescued, target
 					)
-					teleportTo(npc.part.Position)
-					task.wait(0.3) -- let the prompt appear
-					firePromptsOn(npc.instance)
-					rescued = rescued + 1
-					task.wait(math.max(state.RescueDelay, 0.1))
+					rescueHud.TextColor3 = THEME.key
+
+					origin = measureOrigin()
+					local doors = {}
+					for _, inst in ipairs(workspace:GetDescendants()) do
+						if string.find(string.lower(inst.Name), "door") then
+							local part = anchorPart(inst)
+							if part then
+								table.insert(doors, { instance = inst, part = part })
+							end
+						end
+					end
+					if origin and #doors > 0 then
+						table.sort(doors, function(a, b)
+							return (a.part.Position - origin).Magnitude
+								 < (b.part.Position - origin).Magnitude
+						end)
+					end
+
+					if #doors > 0 and doors[1].part and doors[1].part.Parent then
+						rescueHud.Text = string.format(
+							"FLOOR: → %s  (%d/%d rescued)",
+							doors[1].instance.Name, rescued, target
+						)
+						teleportTo(doors[1].part.Position)
+						task.wait(0.3)
+						firePromptsOn(doors[1].instance)
+					else
+						rescueHud.Text = "RESCUE: no Door found, waiting..."
+					end
+
+					-- Wait for new floor to load
+					rescueHud.Text = string.format(
+						"FLOOR: waiting %ds for next floor... (%d/%d)",
+						state.FloorDelay, rescued, target
+					)
+					task.wait(math.max(state.FloorDelay, 1))
+				else
+					-- Rescue NPCs this pass
+					local count = 0
+					for _, npc in ipairs(npcs) do
+						if count >= remaining then break end
+						if not state.AutoRescue or generation ~= autoRescueGen then
+							break
+						end
+						if npc.part and npc.part.Parent and npc.instance.Parent then
+							rescued = rescued + 1
+							rescuedSet[npc.instance] = true
+							rescueHud.Text = string.format(
+								"RESCUE: %d/%s  →  %s",
+								rescued,
+								target > 0 and tostring(target) or "all",
+								npc.instance.Name
+							)
+							teleportTo(npc.part.Position)
+							task.wait(0.3)
+							firePromptsOn(npc.instance)
+							count = count + 1
+							task.wait(math.max(state.RescueDelay, 0.1))
+						end
+					end
+
+					-- After rescuing this batch, check quota
+					if target > 0 and rescued >= target then
+						break -- quota met → zipline
+					end
+					if target == 0 then
+						break -- 0=all mode, one pass done → zipline
+					end
+
+					-- Still need more → short wait then rescan same floor
+					task.wait(math.max(state.RescueDelay, 0.5))
 				end
 			end
 
@@ -1843,41 +1940,43 @@ local function setAutoRescue(on)
 			end
 
 			-------------------------------------------------
-			-- Phase 2: go to the nearest Door
+			-- Phase 2: go to the nearest exit object
+			--   Default "zipline" matches ZiplineBalconyAnchor
 			-------------------------------------------------
-			rescueHud.Text = string.format("RESCUE: done (%d) → finding Door...", rescued)
+			local exitSearch = state.ExitName
+			rescueHud.Text = string.format("RESCUE: done %d → finding %s...", rescued, exitSearch)
 			rescueHud.TextColor3 = THEME.key
 			task.wait(0.5)
 
 			origin = measureOrigin() -- refresh after teleports
-			local doors = {}
+			local exits = {}
 			for _, inst in ipairs(workspace:GetDescendants()) do
-				if string.find(string.lower(inst.Name), "door") then
+				if string.find(string.lower(inst.Name), exitSearch, 1, true) then
 					local part = anchorPart(inst)
 					if part then
-						table.insert(doors, { instance = inst, part = part })
+						table.insert(exits, { instance = inst, part = part })
 					end
 				end
 			end
 
-			if origin and #doors > 0 then
-				table.sort(doors, function(a, b)
+			if origin and #exits > 0 then
+				table.sort(exits, function(a, b)
 					return (a.part.Position - origin).Magnitude
 						 < (b.part.Position - origin).Magnitude
 				end)
 			end
 
-			if #doors > 0 and doors[1].part and doors[1].part.Parent then
-				rescueHud.Text = string.format("DOOR: → %s", doors[1].instance.Name)
-				teleportTo(doors[1].part.Position)
+			if #exits > 0 and exits[1].part and exits[1].part.Parent then
+				rescueHud.Text = string.format("EXIT: → %s", exits[1].instance.Name)
+				teleportTo(exits[1].part.Position)
 				task.wait(0.3)
-				firePromptsOn(doors[1].instance)
+				firePromptsOn(exits[1].instance)
 			else
-				rescueHud.Text = "RESCUE: no Door found, retrying..."
+				rescueHud.Text = string.format("RESCUE: no '%s' found, retrying...", exitSearch)
 			end
 
-			-- Wait for floor transition before scanning again
-			rescueHud.Text = "RESCUE: waiting for next floor..."
+			-- Wait for transition before scanning again
+			rescueHud.Text = "RESCUE: waiting for next round..."
 			task.wait(math.max(state.DoorDelay, 0.5))
 		end
 
@@ -1957,6 +2056,9 @@ resetBtn.Activated:Connect(function()
 	state.AttackSpeed = DEFAULTS.AttackSpeed
 	state.RescueDelay = DEFAULTS.RescueDelay
 	state.DoorDelay = DEFAULTS.DoorDelay
+	state.RescueCount = DEFAULTS.RescueCount
+	state.ExitName = DEFAULTS.ExitName
+	state.FloorDelay = DEFAULTS.FloorDelay
 
 	setAutoRescue(false)
 	setAutoMove(false)
@@ -1977,6 +2079,7 @@ resetBtn.Activated:Connect(function()
 
 	keyQueries = { DEFAULTS.KeyQuery }
 	queryBox.Text = DEFAULTS.KeyQuery
+	exitBox.Text = DEFAULTS.ExitName
 
 	for _, refresh in pairs(rows) do
 		refresh()
