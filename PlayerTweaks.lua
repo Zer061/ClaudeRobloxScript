@@ -6,7 +6,8 @@
 		MOVE    WalkSpeed, Jump, Fly + Fly Speed, Noclip, Fast Attack
 		VIEW    Field of View, Fullbright, ESP on other players
 		KEY     Object ESP: terms, scan rate, range, then
-		        Auto Move + delay, Go to nearest, Instant Prompt
+		        Auto Move + delay, Go to nearest, Instant Prompt,
+		        Auto Rescue (rescue NPCs then go to door, loop)
 		OPT     Hotkeys, UI Scale (resize the panel), Unload
 
 	WHERE TO PUT IT:
@@ -77,6 +78,8 @@ local DEFAULTS = {
 	MoveDelay = 2,
 	SearchRange = 0, -- studs; 0 means no limit
 	UIScale = 1.2, -- whole-panel zoom
+	RescueDelay = 1, -- seconds between each NPC rescue
+	DoorDelay = 3, -- seconds to wait after entering door (floor transition)
 }
 
 local startCam = workspace.CurrentCamera
@@ -97,10 +100,13 @@ local state = {
 	Hotkeys = false, -- master switch starts OFF; turn on in the OPT tab
 	AutoMove = false,
 	InstantPrompt = false,
+	AutoRescue = false, -- rescue loop
 	ScanInterval = DEFAULTS.ScanInterval, -- seconds between workspace sweeps
 	MoveDelay = DEFAULTS.MoveDelay, -- seconds between auto-move hops
 	SearchRange = DEFAULTS.SearchRange, -- studs; 0 means no limit
 	UIScale = DEFAULTS.UIScale, -- whole-panel zoom
+	RescueDelay = DEFAULTS.RescueDelay,
+	DoorDelay = DEFAULTS.DoorDelay,
 }
 
 -- Key ESP search terms. A name matching ANY of these counts as a hit, so the
@@ -1645,6 +1651,228 @@ bind(ProximityPromptService.PromptShown, onPrompt)
 bind(ProximityPromptService.PromptButtonHoldBegan, onPrompt)
 
 --------------------------------------------------------------------
+-- KEY TAB: AUTO RESCUE
+--   Automated rescue loop:
+--     1. Scan workspace for RescueNpc models
+--     2. Teleport to each one (nearest first)
+--     3. Fire its ProximityPrompt to rescue
+--     4. After all NPCs are rescued, find Door and teleport to it
+--     5. Wait for floor transition, then loop from step 1
+--
+--   Works with NPC naming pattern: RescueNpc_<id>_<floor>
+--   (e.g. RescueNpc_90601_3, RescueNpc_90702_3)
+--------------------------------------------------------------------
+
+-- Helper: fire a ProximityPrompt programmatically.
+-- Uses the executor's fireproximityprompt global when available.
+local function firePrompt(prompt)
+	local oldHold = prompt.HoldDuration
+	prompt.HoldDuration = 0
+
+	local ok = false
+	-- Most modern executors (Synapse, Fluxus, etc.) expose this global
+	if type(fireproximityprompt) == "function" then
+		ok = pcall(fireproximityprompt, prompt)
+	end
+	if not ok then
+		-- Fallback: try the internal method some executors allow
+		pcall(function()
+			prompt:InputHoldBegin()
+			task.wait(0.15)
+			prompt:InputHoldEnd()
+		end)
+	end
+
+	task.wait(0.15)
+	prompt.HoldDuration = oldHold
+end
+
+-- Search inside an instance (and its parent's children) for ProximityPrompts
+-- and fire each one. Returns true if at least one was found.
+local function firePromptsOn(inst)
+	local found = false
+
+	-- The instance itself
+	if inst:IsA("ProximityPrompt") then
+		firePrompt(inst)
+		found = true
+	end
+
+	-- Inside the instance and its descendants
+	for _, desc in ipairs(inst:GetDescendants()) do
+		if desc:IsA("ProximityPrompt") then
+			firePrompt(desc)
+			found = true
+		end
+	end
+
+	-- Sibling prompts (prompt might sit next to the NPC model, not inside it)
+	if not found and inst.Parent then
+		for _, child in ipairs(inst.Parent:GetChildren()) do
+			if child:IsA("ProximityPrompt") then
+				firePrompt(child)
+				found = true
+			end
+		end
+	end
+
+	return found
+end
+
+-- Separator label in the KEY tab
+local rescueHeader = Instance.new("TextLabel")
+rescueHeader.Name = "RescueHeader"
+rescueHeader.LayoutOrder = 9
+rescueHeader.Size = UDim2.new(1, 0, 0, 16)
+rescueHeader.BackgroundTransparency = 1
+rescueHeader.Text = "── Auto Rescue ──"
+rescueHeader.TextColor3 = THEME.accent
+rescueHeader.TextSize = 10
+rescueHeader.Font = Enum.Font.GothamBold
+rescueHeader.Parent = keyPage
+
+local autoRescueBtn = toggleButton(keyPage, 10, "Auto Rescue")
+
+numberRow(keyPage, 11, "Rescue (sec)", "RescueDelay", 0.1, 10, 0.5, 1, nil)
+numberRow(keyPage, 12, "Door (sec)", "DoorDelay", 0.5, 15, 0.5, 1, nil)
+
+-- HUD: shows what Auto Rescue is currently doing
+local rescueHud = Instance.new("TextLabel")
+rescueHud.Name = "RescueHud"
+rescueHud.Size = UDim2.fromOffset(320, 28)
+rescueHud.Position = UDim2.new(0.5, -160, 0, 42)
+rescueHud.BackgroundColor3 = Color3.new(0, 0, 0)
+rescueHud.BackgroundTransparency = 0.45
+rescueHud.Font = Enum.Font.GothamBold
+rescueHud.TextSize = 14
+rescueHud.TextColor3 = THEME.ally
+rescueHud.TextStrokeTransparency = 0.4
+rescueHud.Text = ""
+rescueHud.Visible = false
+rescueHud.Parent = gui
+corner(rescueHud, 6)
+
+local autoRescueGen = 0
+
+local function setAutoRescue(on)
+	state.AutoRescue = on
+	paintToggle(autoRescueBtn, "Auto Rescue", on)
+	rescueHud.Visible = on
+
+	autoRescueGen = autoRescueGen + 1
+	if not on then
+		rescueHud.Visible = false
+		return
+	end
+
+	-- Turn on Instant Prompt so rescues happen on contact
+	if not state.InstantPrompt then
+		setInstantPrompt(true)
+	end
+
+	local generation = autoRescueGen
+	task.spawn(function()
+		while state.AutoRescue and generation == autoRescueGen do
+
+			-------------------------------------------------
+			-- Phase 1: find & rescue every RescueNpc
+			-------------------------------------------------
+			local npcs = {}
+			for _, inst in ipairs(workspace:GetDescendants()) do
+				if string.find(string.lower(inst.Name), "rescuenpc") then
+					local part = anchorPart(inst)
+					if part and not isMine(inst) then
+						table.insert(npcs, { instance = inst, part = part })
+					end
+				end
+			end
+
+			-- Sort nearest first
+			local origin = measureOrigin()
+			if origin then
+				table.sort(npcs, function(a, b)
+					return (a.part.Position - origin).Magnitude
+						 < (b.part.Position - origin).Magnitude
+				end)
+			end
+
+			rescueHud.Text = string.format("RESCUE: found %d NPC(s)", #npcs)
+			rescueHud.TextColor3 = THEME.ally
+			rescueHud.Visible = true
+
+			local rescued = 0
+			for i, npc in ipairs(npcs) do
+				if not state.AutoRescue or generation ~= autoRescueGen then
+					break
+				end
+				if npc.part and npc.part.Parent and npc.instance.Parent then
+					rescueHud.Text = string.format(
+						"RESCUE: %d/%d  →  %s",
+						i, #npcs, npc.instance.Name
+					)
+					teleportTo(npc.part.Position)
+					task.wait(0.3) -- let the prompt appear
+					firePromptsOn(npc.instance)
+					rescued = rescued + 1
+					task.wait(math.max(state.RescueDelay, 0.1))
+				end
+			end
+
+			if not state.AutoRescue or generation ~= autoRescueGen then
+				break
+			end
+
+			-------------------------------------------------
+			-- Phase 2: go to the nearest Door
+			-------------------------------------------------
+			rescueHud.Text = string.format("RESCUE: done (%d) → finding Door...", rescued)
+			rescueHud.TextColor3 = THEME.key
+			task.wait(0.5)
+
+			origin = measureOrigin() -- refresh after teleports
+			local doors = {}
+			for _, inst in ipairs(workspace:GetDescendants()) do
+				if string.find(string.lower(inst.Name), "door") then
+					local part = anchorPart(inst)
+					if part then
+						table.insert(doors, { instance = inst, part = part })
+					end
+				end
+			end
+
+			if origin and #doors > 0 then
+				table.sort(doors, function(a, b)
+					return (a.part.Position - origin).Magnitude
+						 < (b.part.Position - origin).Magnitude
+				end)
+			end
+
+			if #doors > 0 and doors[1].part and doors[1].part.Parent then
+				rescueHud.Text = string.format("DOOR: → %s", doors[1].instance.Name)
+				teleportTo(doors[1].part.Position)
+				task.wait(0.3)
+				firePromptsOn(doors[1].instance)
+			else
+				rescueHud.Text = "RESCUE: no Door found, retrying..."
+			end
+
+			-- Wait for floor transition before scanning again
+			rescueHud.Text = "RESCUE: waiting for next floor..."
+			task.wait(math.max(state.DoorDelay, 0.5))
+		end
+
+		-- Loop ended
+		if rescueHud.Parent then
+			rescueHud.Visible = false
+		end
+	end)
+end
+
+autoRescueBtn.Activated:Connect(function()
+	setAutoRescue(not state.AutoRescue)
+end)
+
+--------------------------------------------------------------------
 -- KEY ESP LOOP (user-set scan rate + fixed 0.1s tag/HUD refresh)
 --------------------------------------------------------------------
 
@@ -1707,7 +1935,10 @@ resetBtn.Activated:Connect(function()
 	state.SearchRange = DEFAULTS.SearchRange
 	state.FlySpeed = DEFAULTS.FlySpeed
 	state.AttackSpeed = DEFAULTS.AttackSpeed
+	state.RescueDelay = DEFAULTS.RescueDelay
+	state.DoorDelay = DEFAULTS.DoorDelay
 
+	setAutoRescue(false)
 	setAutoMove(false)
 	setFly(false)
 	setNoclip(false)
@@ -1927,6 +2158,7 @@ local function unloadScript()
 	-- 1. switch every feature off through its own setter, which restores
 	--    lighting, collisions, highlights, prompt hold times, swing speed
 	--    and the fly mover.
+	setAutoRescue(false)
 	setAutoMove(false)
 	setFly(false)
 	setNoclip(false)
