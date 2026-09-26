@@ -1889,7 +1889,8 @@ local function setAutoRescue(on)
 					for _, inst in ipairs(workspace:GetDescendants()) do
 						if string.find(string.lower(inst.Name), "door") then
 							local part = anchorPart(inst)
-							if part then
+							-- Only pick doors ABOVE the player (next floor up)
+							if part and origin and part.Position.Y > origin.Y then
 								table.insert(doors, { instance = inst, part = part })
 							end
 						end
@@ -2002,9 +2003,10 @@ local function setAutoRescue(on)
 				rescueHud.Text = string.format("RESCUE: no '%s' found, retrying...", exitSearch)
 			end
 
-			-- Wait for transition before scanning again
-			rescueHud.Text = "RESCUE: waiting for next round..."
-			task.wait(math.max(state.DoorDelay, 0.5))
+			-- Turn off after reaching zipline so user can inspect
+			rescueHud.Text = string.format("RESCUE: done %d — stopped.", rescued)
+			setAutoRescue(false)
+			break
 		end
 
 		-- Loop ended
